@@ -143,17 +143,49 @@ class MemoryDB {
 }
 
 // ============================================================================
+// Custom API Client
+// ============================================================================
+
+class CustomAPI {
+  private baseURL: string;
+
+  constructor(baseURL: string) {
+    this.baseURL = baseURL;
+  }
+
+  async rerank(query: string, documents: string[], topN: number): Promise<{ index: number; relevance_score: number }[]> {
+    const response = await fetch(`${this.baseURL}/rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        documents,
+        top_n: topN,
+      }),
+    });
+    if (!response.ok) throw new Error(`Rerank failed: ${response.status}`);
+    const result = await response.json();
+    return result.results;
+  }
+}
+
+// ============================================================================
 // OpenAI Embeddings
 // ============================================================================
 
 class Embeddings {
   private client: OpenAI;
+  private customAPI?: CustomAPI;
 
   constructor(
     apiKey: string,
     private model: string,
+    baseURL?: string,
   ) {
-    this.client = new OpenAI({ apiKey });
+    this.client = new OpenAI({ apiKey, baseURL });
+    if (baseURL) {
+      this.customAPI = new CustomAPI(baseURL);
+    }
   }
 
   async embed(text: string): Promise<number[]> {
@@ -162,6 +194,11 @@ class Embeddings {
       input: text,
     });
     return response.data[0].embedding;
+  }
+
+  async rerank(query: string, documents: string[], topN: number): Promise<{ index: number; relevance_score: number }[]> {
+    if (!this.customAPI) throw new Error('Reranker not available');
+    return this.customAPI.rerank(query, documents, topN);
   }
 }
 
@@ -238,7 +275,7 @@ const memoryPlugin = {
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
     const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!, cfg.embedding.baseURL);
 
     api.logger.info(`memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`);
 
@@ -260,13 +297,26 @@ const memoryPlugin = {
           const { query, limit = 5 } = params as { query: string; limit?: number };
 
           const vector = await embeddings.embed(query);
-          const results = await db.search(vector, limit, 0.1);
+          const vectorResults = await db.search(vector, Math.min(limit * 2, 20), 0.05); // Get more candidates
 
-          if (results.length === 0) {
+          if (vectorResults.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant memories found." }],
               details: { count: 0 },
             };
+          }
+
+          let results = vectorResults;
+
+          // Try to rerank if available
+          try {
+            const documents = vectorResults.map(r => r.entry.text);
+            const rerankResults = await embeddings.rerank(query, documents, limit);
+            // Reorder vectorResults by rerank order
+            results = rerankResults.map(rr => vectorResults[rr.index]).slice(0, limit);
+          } catch (err) {
+            api.logger?.warn(`Reranking failed: ${err}, using vector similarity`);
+            results = vectorResults.slice(0, limit);
           }
 
           const text = results
@@ -446,7 +496,18 @@ const memoryPlugin = {
           .option("--limit <n>", "Max results", "5")
           .action(async (query, opts) => {
             const vector = await embeddings.embed(query);
-            const results = await db.search(vector, parseInt(opts.limit), 0.3);
+            const vectorResults = await db.search(vector, Math.min(parseInt(opts.limit) * 2, 20), 0.05);
+            let results = vectorResults.slice(0, parseInt(opts.limit));
+
+            // Try reranking
+            try {
+              const documents = vectorResults.map(r => r.entry.text);
+              const rerankResults = await embeddings.rerank(query, documents, parseInt(opts.limit));
+              results = rerankResults.map(rr => vectorResults[rr.index]);
+            } catch (err) {
+              // Use vector results
+            }
+
             // Strip vectors for output
             const output = results.map((r) => ({
               id: r.entry.id,

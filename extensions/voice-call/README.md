@@ -2,12 +2,22 @@
 
 Official Voice Call plugin for **OpenClaw**.
 
-Providers:
-
+## Telephony Providers
 - **Twilio** (Programmable Voice + Media Streams)
 - **Telnyx** (Call Control v2)
 - **Plivo** (Voice API + XML transfer + GetInput speech)
+- **LiveKit** (WebRTC-based real-time voice via rooms)
 - **Mock** (dev/no network)
+
+## STT Providers (Speech-to-Text)
+- **OpenAI Realtime** (streaming transcription with VAD)
+- **Deepgram** (streaming via Nova-3 with endpointing)
+
+## TTS Providers (Text-to-Speech)
+- **OpenAI** (gpt-4o-mini-tts with voice control)
+- **Deepgram** (Aura voices - asteria, luna, stella, etc.)
+- **ElevenLabs** (multilingual, voice cloning)
+- **Edge TTS** (Microsoft Neural TTS, no API key)
 
 Docs: `https://docs.openclaw.ai/plugins/voice-call`
 Plugin system: `https://docs.openclaw.ai/plugin`
@@ -36,24 +46,24 @@ Put under `plugins.entries.voice-call.config`:
 
 ```json5
 {
-  provider: "twilio", // or "telnyx" | "plivo" | "mock"
+  provider: "twilio", // or "telnyx" | "plivo" | "livekit" | "mock"
   fromNumber: "+15550001234",
   toNumber: "+15550005678",
 
   twilio: {
     accountSid: "ACxxxxxxxx",
-    authToken: "your_token",
+    authToken: "your_token"
   },
 
   plivo: {
     authId: "MAxxxxxxxxxxxxxxxxxxxx",
-    authToken: "your_token",
+    authToken: "your_token"
   },
 
   // Webhook server
   serve: {
     port: 3334,
-    path: "/voice/webhook",
+    path: "/voice/webhook"
   },
 
   // Public exposure (pick one):
@@ -62,41 +72,76 @@ Put under `plugins.entries.voice-call.config`:
   // tailscale: { mode: "funnel", path: "/voice/webhook" }
 
   outbound: {
-    defaultMode: "notify", // or "conversation"
+    defaultMode: "notify" // or "conversation"
   },
 
   streaming: {
     enabled: true,
-    streamPath: "/voice/stream",
+    sttProvider: "deepgram", // or "openai-realtime"
+    sttModel: "nova-3",      // or "gpt-4o-transcribe" for OpenAI
+    streamPath: "/voice/stream"
+  }
+}
+```
+
+### LiveKit Config (WebRTC)
+
+```json5
+{
+  provider: "livekit",
+  livekit: {
+    apiKey: "your_livekit_api_key",
+    apiSecret: "your_livekit_api_secret",
+    wsUrl: "wss://myproject.livekit.cloud",
+    roomPrefix: "openclaw-voice-"
   },
+  streaming: {
+    enabled: true,
+    sttProvider: "deepgram",
+    sttModel: "nova-3"
+  }
 }
 ```
 
 Notes:
-
 - Twilio/Telnyx/Plivo require a **publicly reachable** webhook URL.
+- LiveKit uses WebRTC rooms - no webhook URL needed.
 - `mock` is a local dev provider (no network calls).
 - `tunnel.allowNgrokFreeTierLoopbackBypass: true` allows Twilio webhooks with invalid signatures **only** when `tunnel.provider="ngrok"` and `serve.bind` is loopback (ngrok local agent). Use for local dev only.
 
 ## TTS for calls
 
-Voice Call uses the core `messages.tts` configuration (OpenAI or ElevenLabs) for
-streaming speech on calls. You can override it under the plugin config with the
-same shape — overrides deep-merge with `messages.tts`.
+Voice Call uses the core `messages.tts` configuration for streaming speech on calls.
+You can override it under the plugin config — overrides deep-merge with `messages.tts`.
+
+### OpenAI TTS
 
 ```json5
 {
   tts: {
     provider: "openai",
     openai: {
-      voice: "alloy",
-    },
-  },
+      voice: "alloy" // or coral, marin, cedar, etc.
+    }
+  }
+}
+```
+
+### Deepgram TTS (Aura voices)
+
+```json5
+{
+  tts: {
+    provider: "deepgram",
+    deepgram: {
+      model: "aura-asteria-en" // or aura-luna-en, aura-stella-en, etc.
+    }
+  }
 }
 ```
 
 Notes:
-
+- Deepgram TTS natively supports mu-law 8kHz output for telephony - no conversion needed.
 - Edge TTS is ignored for voice calls (telephony audio needs PCM; Edge output is unreliable).
 - Core TTS is used when Twilio media streaming is enabled; otherwise calls fall back to provider native voices.
 
@@ -117,7 +162,6 @@ openclaw voicecall expose --mode funnel
 Tool name: `voice_call`
 
 Actions:
-
 - `initiate_call` (message, to?, mode?)
 - `continue_call` (callId, message)
 - `speak_to_user` (callId, message)

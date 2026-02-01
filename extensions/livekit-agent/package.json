@@ -1,0 +1,26 @@
+{
+  "name": "@openclaw/livekit-agent",
+  "version": "2026.1.30",
+  "description": "LiveKit voice agent for real-time AI conversations with Deepgram STT/TTS and Cerebras LLM",
+  "type": "module",
+  "bin": {
+    "livekit-agent": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.12.0",
+    "dotenv": "^16.4.0",
+    "livekit-server-sdk": "^2.15.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

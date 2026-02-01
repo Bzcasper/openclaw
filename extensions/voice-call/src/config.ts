@@ -23,7 +23,12 @@ export const E164Schema = z
  * - "pairing": Unknown callers can request pairing (future)
  * - "open": Accept all inbound calls (dangerous!)
  */
-export const InboundPolicySchema = z.enum(["disabled", "allowlist", "pairing", "open"]);
+export const InboundPolicySchema = z.enum([
+  "disabled",
+  "allowlist",
+  "pairing",
+  "open",
+]);
 export type InboundPolicy = z.infer<typeof InboundPolicySchema>;
 
 // -----------------------------------------------------------------------------
@@ -32,33 +37,33 @@ export type InboundPolicy = z.infer<typeof InboundPolicySchema>;
 
 export const TelnyxConfigSchema = z
   .object({
-    /** Telnyx API v2 key */
-    apiKey: z.string().min(1).optional(),
-    /** Telnyx connection ID (from Call Control app) */
-    connectionId: z.string().min(1).optional(),
-    /** Public key for webhook signature verification */
-    publicKey: z.string().min(1).optional(),
-  })
+  /** Telnyx API v2 key */
+  apiKey: z.string().min(1).optional(),
+  /** Telnyx connection ID (from Call Control app) */
+  connectionId: z.string().min(1).optional(),
+  /** Public key for webhook signature verification */
+  publicKey: z.string().min(1).optional(),
+})
   .strict();
 export type TelnyxConfig = z.infer<typeof TelnyxConfigSchema>;
 
 export const TwilioConfigSchema = z
   .object({
-    /** Twilio Account SID */
-    accountSid: z.string().min(1).optional(),
-    /** Twilio Auth Token */
-    authToken: z.string().min(1).optional(),
-  })
+  /** Twilio Account SID */
+  accountSid: z.string().min(1).optional(),
+  /** Twilio Auth Token */
+  authToken: z.string().min(1).optional(),
+})
   .strict();
 export type TwilioConfig = z.infer<typeof TwilioConfigSchema>;
 
 export const PlivoConfigSchema = z
   .object({
-    /** Plivo Auth ID (starts with MA/SA) */
-    authId: z.string().min(1).optional(),
-    /** Plivo Auth Token */
-    authToken: z.string().min(1).optional(),
-  })
+  /** Plivo Auth ID (starts with MA/SA) */
+  authId: z.string().min(1).optional(),
+  /** Plivo Auth Token */
+  authToken: z.string().min(1).optional(),
+})
   .strict();
 export type PlivoConfig = z.infer<typeof PlivoConfigSchema>;
 
@@ -68,16 +73,18 @@ export type PlivoConfig = z.infer<typeof PlivoConfigSchema>;
 
 export const SttConfigSchema = z
   .object({
-    /** STT provider (currently only OpenAI supported) */
-    provider: z.literal("openai").default("openai"),
-    /** Whisper model to use */
+    /** STT provider: openai, deepgram, or openai-realtime (streaming) */
+    provider: z.enum(["openai", "deepgram", "openai-realtime"]).default("openai"),
+    /** Model to use (e.g., whisper-1, nova-3, gpt-4o-transcribe) */
     model: z.string().min(1).default("whisper-1"),
+    /** Language code for STT (e.g., "en") */
+    language: z.string().min(1).optional(),
   })
   .strict()
   .default({ provider: "openai", model: "whisper-1" });
 export type SttConfig = z.infer<typeof SttConfigSchema>;
 
-export const TtsProviderSchema = z.enum(["openai", "elevenlabs", "edge"]);
+export const TtsProviderSchema = z.enum(["openai", "elevenlabs", "edge", "deepgram"]);
 export const TtsModeSchema = z.enum(["final", "all"]);
 export const TtsAutoSchema = z.enum(["off", "always", "inbound", "tagged"]);
 
@@ -146,6 +153,19 @@ export const TtsConfigSchema = z
       })
       .strict()
       .optional(),
+    deepgram: z
+      .object({
+        /** Deepgram API key (uses DEEPGRAM_API_KEY env if not set) */
+        apiKey: z.string().optional(),
+        /** Aura voice model (e.g., aura-asteria-en, aura-luna-en) */
+        model: z.string().optional(),
+        /** Audio encoding (linear16, mulaw, alaw) */
+        encoding: z.string().optional(),
+        /** Sample rate in Hz */
+        sampleRate: z.number().int().min(8000).max(48000).optional(),
+      })
+      .strict()
+      .optional(),
     prefsPath: z.string().optional(),
     maxTextLength: z.number().int().min(1).optional(),
     timeoutMs: z.number().int().min(1000).max(120000).optional(),
@@ -185,7 +205,9 @@ export const VoiceCallTailscaleConfigSchema = z
   })
   .strict()
   .default({ mode: "off", path: "/voice/webhook" });
-export type VoiceCallTailscaleConfig = z.infer<typeof VoiceCallTailscaleConfigSchema>;
+export type VoiceCallTailscaleConfig = z.infer<
+  typeof VoiceCallTailscaleConfigSchema
+>;
 
 // -----------------------------------------------------------------------------
 // Tunnel Configuration (unified ngrok/tailscale)
@@ -200,7 +222,9 @@ export const VoiceCallTunnelConfigSchema = z
      * - "tailscale-serve": Tailscale serve (private to tailnet)
      * - "tailscale-funnel": Tailscale funnel (public HTTPS)
      */
-    provider: z.enum(["none", "ngrok", "tailscale-serve", "tailscale-funnel"]).default("none"),
+    provider: z
+      .enum(["none", "ngrok", "tailscale-serve", "tailscale-funnel"])
+      .default("none"),
     /** ngrok auth token (optional, enables longer sessions and more features) */
     ngrokAuthToken: z.string().min(1).optional(),
     /** ngrok custom domain (paid feature, e.g., "myapp.ngrok.io") */
@@ -252,15 +276,17 @@ export const VoiceCallStreamingConfigSchema = z
   .object({
     /** Enable real-time audio streaming (requires WebSocket support) */
     enabled: z.boolean().default(false),
-    /** STT provider for real-time transcription */
-    sttProvider: z.enum(["openai-realtime"]).default("openai-realtime"),
+    /** STT provider for real-time transcription (openai-realtime or deepgram) */
+    sttProvider: z.enum(["openai-realtime", "deepgram"]).default("openai-realtime"),
     /** OpenAI API key for Realtime API (uses OPENAI_API_KEY env if not set) */
     openaiApiKey: z.string().min(1).optional(),
-    /** OpenAI transcription model (default: gpt-4o-transcribe) */
+    /** Deepgram API key (uses DEEPGRAM_API_KEY env if not set) */
+    deepgramApiKey: z.string().min(1).optional(),
+    /** STT model (e.g., gpt-4o-transcribe for OpenAI, nova-3 for Deepgram) */
     sttModel: z.string().min(1).default("gpt-4o-transcribe"),
-    /** VAD silence duration in ms before considering speech ended */
+    /** VAD silence duration in ms before considering speech ended (endpointing) */
     silenceDurationMs: z.number().int().positive().default(800),
-    /** VAD threshold 0-1 (higher = less sensitive) */
+    /** VAD threshold 0-1 (higher = less sensitive, OpenAI only) */
     vadThreshold: z.number().min(0).max(1).default(0.5),
     /** WebSocket path for media stream connections */
     streamPath: z.string().min(1).default("/voice/stream"),
@@ -274,7 +300,9 @@ export const VoiceCallStreamingConfigSchema = z
     vadThreshold: 0.5,
     streamPath: "/voice/stream",
   });
-export type VoiceCallStreamingConfig = z.infer<typeof VoiceCallStreamingConfigSchema>;
+export type VoiceCallStreamingConfig = z.infer<
+  typeof VoiceCallStreamingConfigSchema
+>;
 
 // -----------------------------------------------------------------------------
 // Main Voice Call Configuration
@@ -282,90 +310,105 @@ export type VoiceCallStreamingConfig = z.infer<typeof VoiceCallStreamingConfigSc
 
 export const VoiceCallConfigSchema = z
   .object({
-    /** Enable voice call functionality */
-    enabled: z.boolean().default(false),
+  /** Enable voice call functionality */
+  enabled: z.boolean().default(false),
 
-    /** Active provider (telnyx, twilio, plivo, or mock) */
-    provider: z.enum(["telnyx", "twilio", "plivo", "mock"]).optional(),
+  /** Active provider (telnyx, twilio, plivo, livekit, or mock) */
+  provider: z.enum(["telnyx", "twilio", "plivo", "livekit", "mock"]).optional(),
 
-    /** Telnyx-specific configuration */
-    telnyx: TelnyxConfigSchema.optional(),
+  /** Telnyx-specific configuration */
+  telnyx: TelnyxConfigSchema.optional(),
 
-    /** Twilio-specific configuration */
-    twilio: TwilioConfigSchema.optional(),
+  /** Twilio-specific configuration */
+  twilio: TwilioConfigSchema.optional(),
 
-    /** Plivo-specific configuration */
-    plivo: PlivoConfigSchema.optional(),
+  /** Plivo-specific configuration */
+  plivo: PlivoConfigSchema.optional(),
 
-    /** Phone number to call from (E.164) */
-    fromNumber: E164Schema.optional(),
+  /** LiveKit-specific configuration (WebRTC-based voice) */
+  livekit: z
+    .object({
+      /** LiveKit API key */
+      apiKey: z.string().min(1).optional(),
+      /** LiveKit API secret */
+      apiSecret: z.string().min(1).optional(),
+      /** LiveKit WebSocket URL (e.g., wss://myproject.livekit.cloud) */
+      wsUrl: z.string().url().optional(),
+      /** Prefix for room names (default: openclaw-voice-) */
+      roomPrefix: z.string().optional(),
+    })
+    .strict()
+    .optional(),
 
-    /** Default phone number to call (E.164) */
-    toNumber: E164Schema.optional(),
+  /** Phone number to call from (E.164) */
+  fromNumber: E164Schema.optional(),
 
-    /** Inbound call policy */
-    inboundPolicy: InboundPolicySchema.default("disabled"),
+  /** Default phone number to call (E.164) */
+  toNumber: E164Schema.optional(),
 
-    /** Allowlist of phone numbers for inbound calls (E.164) */
-    allowFrom: z.array(E164Schema).default([]),
+  /** Inbound call policy */
+  inboundPolicy: InboundPolicySchema.default("disabled"),
 
-    /** Greeting message for inbound calls */
-    inboundGreeting: z.string().optional(),
+  /** Allowlist of phone numbers for inbound calls (E.164) */
+  allowFrom: z.array(E164Schema).default([]),
 
-    /** Outbound call configuration */
-    outbound: OutboundConfigSchema,
+  /** Greeting message for inbound calls */
+  inboundGreeting: z.string().optional(),
 
-    /** Maximum call duration in seconds */
-    maxDurationSeconds: z.number().int().positive().default(300),
+  /** Outbound call configuration */
+  outbound: OutboundConfigSchema,
 
-    /** Silence timeout for end-of-speech detection (ms) */
-    silenceTimeoutMs: z.number().int().positive().default(800),
+  /** Maximum call duration in seconds */
+  maxDurationSeconds: z.number().int().positive().default(300),
 
-    /** Timeout for user transcript (ms) */
-    transcriptTimeoutMs: z.number().int().positive().default(180000),
+  /** Silence timeout for end-of-speech detection (ms) */
+  silenceTimeoutMs: z.number().int().positive().default(800),
 
-    /** Ring timeout for outbound calls (ms) */
-    ringTimeoutMs: z.number().int().positive().default(30000),
+  /** Timeout for user transcript (ms) */
+  transcriptTimeoutMs: z.number().int().positive().default(180000),
 
-    /** Maximum concurrent calls */
-    maxConcurrentCalls: z.number().int().positive().default(1),
+  /** Ring timeout for outbound calls (ms) */
+  ringTimeoutMs: z.number().int().positive().default(30000),
 
-    /** Webhook server configuration */
-    serve: VoiceCallServeConfigSchema,
+  /** Maximum concurrent calls */
+  maxConcurrentCalls: z.number().int().positive().default(1),
 
-    /** Tailscale exposure configuration (legacy, prefer tunnel config) */
-    tailscale: VoiceCallTailscaleConfigSchema,
+  /** Webhook server configuration */
+  serve: VoiceCallServeConfigSchema,
 
-    /** Tunnel configuration (unified ngrok/tailscale) */
-    tunnel: VoiceCallTunnelConfigSchema,
+  /** Tailscale exposure configuration (legacy, prefer tunnel config) */
+  tailscale: VoiceCallTailscaleConfigSchema,
 
-    /** Real-time audio streaming configuration */
-    streaming: VoiceCallStreamingConfigSchema,
+  /** Tunnel configuration (unified ngrok/tailscale) */
+  tunnel: VoiceCallTunnelConfigSchema,
 
-    /** Public webhook URL override (if set, bypasses tunnel auto-detection) */
-    publicUrl: z.string().url().optional(),
+  /** Real-time audio streaming configuration */
+  streaming: VoiceCallStreamingConfigSchema,
 
-    /** Skip webhook signature verification (development only, NOT for production) */
-    skipSignatureVerification: z.boolean().default(false),
+  /** Public webhook URL override (if set, bypasses tunnel auto-detection) */
+  publicUrl: z.string().url().optional(),
 
-    /** STT configuration */
-    stt: SttConfigSchema,
+  /** Skip webhook signature verification (development only, NOT for production) */
+  skipSignatureVerification: z.boolean().default(false),
 
-    /** TTS override (deep-merges with core messages.tts) */
-    tts: TtsConfigSchema,
+  /** STT configuration */
+  stt: SttConfigSchema,
 
-    /** Store path for call logs */
-    store: z.string().optional(),
+  /** TTS override (deep-merges with core messages.tts) */
+  tts: TtsConfigSchema,
 
-    /** Model for generating voice responses (e.g., "anthropic/claude-sonnet-4", "openai/gpt-4o") */
-    responseModel: z.string().default("openai/gpt-4o-mini"),
+  /** Store path for call logs */
+  store: z.string().optional(),
 
-    /** System prompt for voice responses */
-    responseSystemPrompt: z.string().optional(),
+  /** Model for generating voice responses (e.g., "anthropic/claude-sonnet-4", "openai/gpt-4o") */
+  responseModel: z.string().default("openai/gpt-4o-mini"),
 
-    /** Timeout for response generation in ms (default 30s) */
-    responseTimeoutMs: z.number().int().positive().default(30000),
-  })
+  /** System prompt for voice responses */
+  responseSystemPrompt: z.string().optional(),
+
+  /** Timeout for response generation in ms (default 30s) */
+  responseTimeoutMs: z.number().int().positive().default(30000),
+})
   .strict();
 
 export type VoiceCallConfig = z.infer<typeof VoiceCallConfigSchema>;
@@ -384,23 +427,47 @@ export function resolveVoiceCallConfig(config: VoiceCallConfig): VoiceCallConfig
   // Telnyx
   if (resolved.provider === "telnyx") {
     resolved.telnyx = resolved.telnyx ?? {};
-    resolved.telnyx.apiKey = resolved.telnyx.apiKey ?? process.env.TELNYX_API_KEY;
-    resolved.telnyx.connectionId = resolved.telnyx.connectionId ?? process.env.TELNYX_CONNECTION_ID;
-    resolved.telnyx.publicKey = resolved.telnyx.publicKey ?? process.env.TELNYX_PUBLIC_KEY;
+    resolved.telnyx.apiKey =
+      resolved.telnyx.apiKey ?? process.env.TELNYX_API_KEY;
+    resolved.telnyx.connectionId =
+      resolved.telnyx.connectionId ?? process.env.TELNYX_CONNECTION_ID;
+    resolved.telnyx.publicKey =
+      resolved.telnyx.publicKey ?? process.env.TELNYX_PUBLIC_KEY;
   }
 
   // Twilio
   if (resolved.provider === "twilio") {
     resolved.twilio = resolved.twilio ?? {};
-    resolved.twilio.accountSid = resolved.twilio.accountSid ?? process.env.TWILIO_ACCOUNT_SID;
-    resolved.twilio.authToken = resolved.twilio.authToken ?? process.env.TWILIO_AUTH_TOKEN;
+    resolved.twilio.accountSid =
+      resolved.twilio.accountSid ?? process.env.TWILIO_ACCOUNT_SID;
+    resolved.twilio.authToken =
+      resolved.twilio.authToken ?? process.env.TWILIO_AUTH_TOKEN;
   }
 
   // Plivo
   if (resolved.provider === "plivo") {
     resolved.plivo = resolved.plivo ?? {};
-    resolved.plivo.authId = resolved.plivo.authId ?? process.env.PLIVO_AUTH_ID;
-    resolved.plivo.authToken = resolved.plivo.authToken ?? process.env.PLIVO_AUTH_TOKEN;
+    resolved.plivo.authId =
+      resolved.plivo.authId ?? process.env.PLIVO_AUTH_ID;
+    resolved.plivo.authToken =
+      resolved.plivo.authToken ?? process.env.PLIVO_AUTH_TOKEN;
+  }
+
+  // LiveKit
+  if (resolved.provider === "livekit") {
+    resolved.livekit = resolved.livekit ?? {};
+    resolved.livekit.apiKey =
+      resolved.livekit.apiKey ?? process.env.LIVEKIT_API_KEY;
+    resolved.livekit.apiSecret =
+      resolved.livekit.apiSecret ?? process.env.LIVEKIT_API_SECRET;
+    resolved.livekit.wsUrl =
+      resolved.livekit.wsUrl ?? process.env.LIVEKIT_URL;
+  }
+
+  // Streaming STT (Deepgram)
+  if (resolved.streaming?.sttProvider === "deepgram") {
+    resolved.streaming.deepgramApiKey =
+      resolved.streaming.deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
   }
 
   // Tunnel Config
@@ -409,9 +476,13 @@ export function resolveVoiceCallConfig(config: VoiceCallConfig): VoiceCallConfig
     allowNgrokFreeTierLoopbackBypass: false,
   };
   resolved.tunnel.allowNgrokFreeTierLoopbackBypass =
-    resolved.tunnel.allowNgrokFreeTierLoopbackBypass || resolved.tunnel.allowNgrokFreeTier || false;
-  resolved.tunnel.ngrokAuthToken = resolved.tunnel.ngrokAuthToken ?? process.env.NGROK_AUTHTOKEN;
-  resolved.tunnel.ngrokDomain = resolved.tunnel.ngrokDomain ?? process.env.NGROK_DOMAIN;
+    resolved.tunnel.allowNgrokFreeTierLoopbackBypass ||
+    resolved.tunnel.allowNgrokFreeTier ||
+    false;
+  resolved.tunnel.ngrokAuthToken =
+    resolved.tunnel.ngrokAuthToken ?? process.env.NGROK_AUTHTOKEN;
+  resolved.tunnel.ngrokDomain =
+    resolved.tunnel.ngrokDomain ?? process.env.NGROK_DOMAIN;
 
   return resolved;
 }
@@ -433,7 +504,8 @@ export function validateProviderConfig(config: VoiceCallConfig): {
     errors.push("plugins.entries.voice-call.config.provider is required");
   }
 
-  if (!config.fromNumber && config.provider !== "mock") {
+  // fromNumber not required for LiveKit (WebRTC) or mock
+  if (!config.fromNumber && config.provider !== "mock" && config.provider !== "livekit") {
     errors.push("plugins.entries.voice-call.config.fromNumber is required");
   }
 
@@ -472,6 +544,24 @@ export function validateProviderConfig(config: VoiceCallConfig): {
     if (!config.plivo?.authToken) {
       errors.push(
         "plugins.entries.voice-call.config.plivo.authToken is required (or set PLIVO_AUTH_TOKEN env)",
+      );
+    }
+  }
+
+  if (config.provider === "livekit") {
+    if (!config.livekit?.apiKey) {
+      errors.push(
+        "plugins.entries.voice-call.config.livekit.apiKey is required (or set LIVEKIT_API_KEY env)",
+      );
+    }
+    if (!config.livekit?.apiSecret) {
+      errors.push(
+        "plugins.entries.voice-call.config.livekit.apiSecret is required (or set LIVEKIT_API_SECRET env)",
+      );
+    }
+    if (!config.livekit?.wsUrl) {
+      errors.push(
+        "plugins.entries.voice-call.config.livekit.wsUrl is required (or set LIVEKIT_URL env)",
       );
     }
   }
