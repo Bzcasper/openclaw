@@ -71,4 +71,16 @@ USER.md
 
 # local tooling
 .serena/
-.env.local
+
+# Repomix output files
+repomix-output.*
+ai-packs/
+repomix-run.log
+
+# AI Knowledge Base (generated files)
+ai-kb/*.xml
+ai-kb/*.md
+
+
+# AI Knowledge Base (generated XML files)
+ai-kb/*.xml
