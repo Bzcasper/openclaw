@@ -1,0 +1,50 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "xai/grok-4-latest"
+      },
+      "models": {
+        "xai/grok-4-latest": { "alias": "Grok 4" }
+      },
+      "maxConcurrent": 4
+    },
+    "list": [
+      {
+        "id": "main",
+        "default": true
+      }
+    ]
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "xai": {
+        "baseUrl": "https://api.x.ai/v1",
+        "apiKey": "${XAI_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "grok-4-latest",
+            "name": "Grok 4",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 131072,
+            "maxTokens": 32768
+          }
+        ]
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "auto",
+    "trustedProxies": ["172.16.2.2"],
+    "controlUi": {
+      "allowInsecureAuth": true
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.2.4"
+  }
+}
