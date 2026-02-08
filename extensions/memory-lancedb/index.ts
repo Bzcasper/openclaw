@@ -6,8 +6,8 @@
  * Provides seamless auto-recall and auto-capture via lifecycle hooks.
  */
 
+import type * as LanceDB from "@lancedb/lancedb";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import * as lancedb from "@lancedb/lancedb";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
@@ -22,6 +22,19 @@ import {
 // ============================================================================
 // Types
 // ============================================================================
+
+let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null = null;
+const loadLanceDB = async (): Promise<typeof import("@lancedb/lancedb")> => {
+  if (!lancedbImportPromise) {
+    lancedbImportPromise = import("@lancedb/lancedb");
+  }
+  try {
+    return await lancedbImportPromise;
+  } catch (err) {
+    // Common on macOS today: upstream package may not ship darwin native bindings.
+    throw new Error(`memory-lancedb: failed to load LanceDB. ${String(err)}`, { cause: err });
+  }
+};
 
 type MemoryEntry = {
   id: string;
@@ -44,8 +57,8 @@ type MemorySearchResult = {
 const TABLE_NAME = "memories";
 
 class MemoryDB {
-  private db: lancedb.Connection | null = null;
-  private table: lancedb.Table | null = null;
+  private db: LanceDB.Connection | null = null;
+  private table: LanceDB.Table | null = null;
   private initPromise: Promise<void> | null = null;
 
   constructor(
@@ -66,6 +79,7 @@ class MemoryDB {
   }
 
   private async doInitialize(): Promise<void> {
+    const lancedb = await loadLanceDB();
     this.db = await lancedb.connect(this.dbPath);
     const tables = await this.db.tableNames();
 
@@ -153,10 +167,14 @@ class CustomAPI {
     this.baseURL = baseURL;
   }
 
-  async rerank(query: string, documents: string[], topN: number): Promise<{ index: number; relevance_score: number }[]> {
+  async rerank(
+    query: string,
+    documents: string[],
+    topN: number,
+  ): Promise<{ index: number; relevance_score: number }[]> {
     const response = await fetch(`${this.baseURL}/rerank`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query,
         documents,
@@ -196,8 +214,12 @@ class Embeddings {
     return response.data[0].embedding;
   }
 
-  async rerank(query: string, documents: string[], topN: number): Promise<{ index: number; relevance_score: number }[]> {
-    if (!this.customAPI) throw new Error('Reranker not available');
+  async rerank(
+    query: string,
+    documents: string[],
+    topN: number,
+  ): Promise<{ index: number; relevance_score: number }[]> {
+    if (!this.customAPI) throw new Error("Reranker not available");
     return this.customAPI.rerank(query, documents, topN);
   }
 }
@@ -275,7 +297,11 @@ const memoryPlugin = {
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
     const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!, cfg.embedding.baseURL);
+    const embeddings = new Embeddings(
+      cfg.embedding.apiKey,
+      cfg.embedding.model!,
+      cfg.embedding.baseURL,
+    );
 
     api.logger.info(`memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`);
 
@@ -310,10 +336,10 @@ const memoryPlugin = {
 
           // Try to rerank if available
           try {
-            const documents = vectorResults.map(r => r.entry.text);
+            const documents = vectorResults.map((r) => r.entry.text);
             const rerankResults = await embeddings.rerank(query, documents, limit);
             // Reorder vectorResults by rerank order
-            results = rerankResults.map(rr => vectorResults[rr.index]).slice(0, limit);
+            results = rerankResults.map((rr) => vectorResults[rr.index]).slice(0, limit);
           } catch (err) {
             api.logger?.warn(`Reranking failed: ${err}, using vector similarity`);
             results = vectorResults.slice(0, limit);
@@ -496,14 +522,18 @@ const memoryPlugin = {
           .option("--limit <n>", "Max results", "5")
           .action(async (query, opts) => {
             const vector = await embeddings.embed(query);
-            const vectorResults = await db.search(vector, Math.min(parseInt(opts.limit) * 2, 20), 0.05);
+            const vectorResults = await db.search(
+              vector,
+              Math.min(parseInt(opts.limit) * 2, 20),
+              0.05,
+            );
             let results = vectorResults.slice(0, parseInt(opts.limit));
 
             // Try reranking
             try {
-              const documents = vectorResults.map(r => r.entry.text);
+              const documents = vectorResults.map((r) => r.entry.text);
               const rerankResults = await embeddings.rerank(query, documents, parseInt(opts.limit));
-              results = rerankResults.map(rr => vectorResults[rr.index]);
+              results = rerankResults.map((rr) => vectorResults[rr.index]);
             } catch (err) {
               // Use vector results
             }
