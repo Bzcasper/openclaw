@@ -319,6 +319,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/ffmpeg-handbook:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/google-antigravity-auth:
     devDependencies:
       openclaw:
@@ -416,6 +422,12 @@ importers:
         version: link:../..
 
   extensions/minimax-portal-auth:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/modal-labs:
     devDependencies:
       openclaw:
         specifier: workspace:*
@@ -533,6 +545,12 @@ importers:
         version: link:../..
 
   extensions/whatsapp:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/ximagine:
     devDependencies:
       openclaw:
         specifier: workspace:*

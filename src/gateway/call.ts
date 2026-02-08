@@ -18,6 +18,8 @@ import {
 import { GatewayClient } from "./client.js";
 import { PROTOCOL_VERSION } from "./protocol/index.js";
 
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 export type CallGatewayOptions = {
   url?: string;
   token?: string;
@@ -149,7 +151,11 @@ export function buildGatewayConnectionDetails(
 export async function callGateway<T = Record<string, unknown>>(
   opts: CallGatewayOptions,
 ): Promise<T> {
-  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const timeoutMsRaw =
+    typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 10_000;
+  // Node timers clamp to a 32-bit signed integer; exceeding it triggers TimeoutOverflowWarning and
+  // causes immediate timeouts. Keep this safely bounded.
+  const timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMsRaw)));
   const config = opts.config ?? loadConfig();
   const isRemoteMode = config.gateway?.mode === "remote";
   const remote = isRemoteMode ? config.gateway?.remote : undefined;

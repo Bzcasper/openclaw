@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -42,7 +43,7 @@ if not DEEPGRAM_API_KEY:
         for line in env_file.read_text().splitlines():
             line = line.strip()
             if line.startswith("DEEPGRAM_API_KEY="):
-                DEEPGRAM_API_KEY = line.split("=", 1)[1].strip().strip("'\"")
+                DEEPGRAM_API_KEY = line.split("=", 1)[1].strip().strip('"')
                 break
 
 if not DEEPGRAM_API_KEY:
@@ -146,6 +147,7 @@ _NOISE_PATTERNS = [
     re.compile(r"(?i).*lanc(e|db).*"),
     re.compile(r"(?i)^\s*(loading|loaded|initializ).*memory.*$"),
     re.compile(r"(?i)^\s*\[?(info|debug|warn|trace|verbose)\]?:?\s"),
+    re.compile(r"(?i)^\s*\[plugins\].*"),  # catch [plugins] memory-lancedb...
     re.compile(r"(?i)^\s*memory[-_]?(core|lancedb|claude[-_]?mem).*$"),
     re.compile(r"(?i)^\s*[✓⚙●◆▶].*$"),
     re.compile(r"(?i)^\s*#+ "),  # markdown headings
@@ -156,9 +158,14 @@ _NOISE_PATTERNS = [
     re.compile(r"(?i)^\s*(vector|chunk|index)\s"),
 ]
 
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~])')
+
 
 def clean_response(text: str) -> str:
     """Strip internal status/debug lines and markdown artifacts from response."""
+    # First, strip ANSI color codes so regex patterns match correctly
+    text = ANSI_ESCAPE.sub('', text)
+
     lines = text.splitlines()
     cleaned = []
     for line in lines:
@@ -171,7 +178,7 @@ def clean_response(text: str) -> str:
         line = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", line)  # links → text only
         cleaned.append(line)
     result = "\n".join(cleaned).strip()
-    return result if result else text
+    return result
 
 
 # ── Conversation Memory ──────────────────────────────────────────────────────
@@ -181,406 +188,352 @@ MEMORY_FILE = MEMORY_DIR / "conversations.jsonl"
 MEMORY_TURNS = int(os.environ.get("VOICE_WAKE_MEMORY_TURNS", "20"))
 
 
-def _ensure_memory_dir():
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def save_turn(role: str, text: str):
+def save_turn(role: str, text: str) -> None:
     """Append a conversation turn to the memory file."""
-    _ensure_memory_dir()
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "role": role,
-        "text": text.strip(),
+        "text": text,
     }
-    with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+    with open(MEMORY_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
 
-def load_recent_turns(n: int = MEMORY_TURNS) -> list[dict]:
-    """Load the last N conversation turns from memory."""
+def load_recent_turns(n: int) -> list[dict]:
+    """Load the last n conversation turns from memory."""
     if not MEMORY_FILE.exists():
         return []
+    lines = MEMORY_FILE.read_text().strip().splitlines()
     turns = []
-    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                turns.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return turns[-n:]
+    for line in lines[-n:]:
+        try:
+            turns.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return turns
 
 
 def format_memory_context(turns: list[dict]) -> str:
-    """Format recent turns into a context string for the agent."""
+    """Format conversation turns into a context string for the prompt."""
     if not turns:
         return ""
-    parts = ["[Recent conversation history]"]
-    for t in turns:
-        role = t.get("role", "?")
-        text = t.get("text", "")
-        ts = t.get("ts", "")
-        # Only include date portion for readability
-        day = ts[:10] if len(ts) >= 10 else ts
-        parts.append(f"{role.upper()} ({day}): {text}")
-    parts.append("[End of history]")
-    return "\n".join(parts)
+    lines = []
+    for turn in turns:
+        ts = turn.get("ts", "")
+        # Extract just the date part for brevity
+        if ts:
+            try:
+                dt = datetime.datetime.fromisoformat(ts)
+                ts_short = dt.strftime("%Y-%m-%d")
+            except:
+                ts_short = ts[:10]
+        else:
+            ts_short = ""
+        role = turn.get("role", "unknown").upper()
+        text = turn.get("text", "")
+        lines.append(f"{role} ({ts_short}): {text}")
+    return "\n".join(lines)
 
 
-# ── Audio helpers ────────────────────────────────────────────────────────────
+# ── OpenClaw Integration ─────────────────────────────────────────────────────
 
 
-def _generate_tone(freq: float, duration: float = 0.15, volume: float = 0.3) -> bytes:
-    """Generate a sine-wave tone as 16-bit PCM."""
-    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), dtype=np.float32)
-    tone = (np.sin(2 * np.pi * freq * t) * volume * 32767).astype(np.int16)
-    return tone.tobytes()
-
-
-def _play_wav_bytes(pcm: bytes, sr: int = SAMPLE_RATE):
-    """Write PCM to a temp wav and play via aplay."""
+def send_to_openclaw(command: str, memory_ctx: str) -> str:
+    """Send a command to OpenClaw with memory context and return the response."""
+    # Build the full prompt with persona, memory context, and user command
+    parts = ["Persona:", PERSONA, ""]
+    
+    if memory_ctx:
+        parts.extend([
+            "Recent conversation history:",
+            memory_ctx,
+            "",
+        ])
+    
+    parts.extend([
+        "User voice command:",
+        command,
+        "",
+        "Respond naturally as a voice assistant. Be concise and conversational.",
+    ])
+    
+    full_prompt = "\n".join(parts)
+    
+    # Try using openclaw agent command first
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tmp = f.name
-            with wave.open(tmp, "w") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sr)
-                wf.writeframes(pcm)
-        subprocess.run(["aplay", "-q", tmp], timeout=5, capture_output=True)
-        os.unlink(tmp)
-    except Exception:
-        pass
-
-
-def play_activation_chime():
-    """Two-tone ascending chime."""
-    pcm1 = _generate_tone(660, 0.1, 0.25)
-    pcm2 = _generate_tone(880, 0.15, 0.3)
-    _play_wav_bytes(pcm1 + pcm2)
-
-
-def play_deactivation_chime():
-    """Two-tone descending chime."""
-    pcm1 = _generate_tone(880, 0.1, 0.25)
-    pcm2 = _generate_tone(440, 0.15, 0.3)
-    _play_wav_bytes(pcm1 + pcm2)
-
-
-def play_listening_blip():
-    """Short blip to indicate the agent is listening for the next command."""
-    pcm = _generate_tone(660, 0.06, 0.15)
-    _play_wav_bytes(pcm)
-
-
-# ── TTS ──────────────────────────────────────────────────────────────────────
-
-
-def speak(text: str):
-    """Speak text aloud using Deepgram TTS. Falls back to printing."""
-    if not text.strip():
-        return
-    print(f"[SPEAK] {text[:120]}{'...' if len(text) > 120 else ''}")
-    if len(text) > 3000:
-        text = text[:2997] + "..."
-    try:
-        dg = DeepgramClient()
-        audio_iter = dg.speak.v1.audio.generate(
-            text=text,
-            model=TTS_VOICE,
-            encoding="linear16",
-            container="wav",
-            sample_rate=24000,
-        )
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tts_path = f.name
-            for chunk in audio_iter:
-                f.write(chunk)
-        subprocess.run(
-            ["mpv", "--no-terminal", "--no-video", tts_path],
+        result = subprocess.run(
+            [OPENCLAW_BIN, "agent", "--message", full_prompt, "--thinking", "low", "--agent", "main", "--local"],
+            capture_output=True,
+            text=True,
             timeout=60,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
-        os.unlink(tts_path)
+        if result.returncode == 0:
+            return clean_response(result.stdout.strip())
+        else:
+            # Fallback error message
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            print(f"[OpenClaw error] {error_msg}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        return "Sorry, that took too long. Try again?"
     except Exception as e:
-        print(f"[TTS ERROR] {e}", file=sys.stderr)
-        print(f"[FALLBACK TEXT] {text}")
+        print(f"[OpenClaw exception] {e}", file=sys.stderr)
+    
+    # Fallback response
+    return "I'm having trouble connecting. Please check that OpenClaw is running."
 
 
-# ── OpenClaw interaction ─────────────────────────────────────────────────────
+# ── Audio Output ─────────────────────────────────────────────────────────────
 
 
-def send_to_openclaw(message: str, memory_context: str = "") -> str:
-    """Send a message to OpenClaw and return the response text."""
-    # Build the full prompt with persona + memory + user message
-    full_message = message
-    if memory_context:
-        full_message = (
-            f"[System context — do not read aloud]\n"
-            f"Persona: {PERSONA}\n\n"
-            f"{memory_context}\n\n"
-            f"[User voice command]\n"
-            f"{message}\n\n"
-            f"[Respond naturally as a voice assistant. Keep it conversational and concise. "
-            f"No markdown formatting, no bullet points, no code blocks. "
-            f"Speak as if talking to someone in person.]"
-        )
-
-    print(f"[SEND] {message}")
-    env = {**os.environ, "DEEPGRAM_API_KEY": DEEPGRAM_API_KEY}
-
-    # Try message send first (talks to running gateway)
+def speak(text: str) -> None:
+    """Convert text to speech and play it using Deepgram TTS."""
+    if not text:
+        return
+    
+    # Clean the text for TTS (remove any remaining markdown artifacts)
+    clean_text = re.sub(r"\*\*|\*|`|#|\[|\]|\(|\)", "", text)
+    
     try:
-        proc = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--text",
-                full_message,
-                "--wait",
-                "--timeout",
-                "60",
-                "--format",
-                "text",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=65,
-            env=env,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return clean_response(proc.stdout.strip())
+        import requests
+        
+        # Deepgram TTS API
+        url = "https://api.deepgram.com/v1/speak"
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        params = {
+            "model": TTS_VOICE,
+        }
+        data = {"text": clean_text}
+        
+        response = requests.post(url, headers=headers, params=params, json=data, timeout=30)
+        
+        if response.status_code == 200:
+            # Save to temp file and play with mpv
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                f.write(response.content)
+                temp_path = f.name
+            
+            try:
+                subprocess.run(
+                    ["mpv", "--quiet", "--no-video", temp_path],
+                    capture_output=True,
+                    timeout=60,
+                )
+            finally:
+                os.unlink(temp_path)
+        else:
+            print(f"[TTS error] HTTP {response.status_code}", file=sys.stderr)
+            print(f"  {clean_text}")  # Fallback: print text
+    except Exception as e:
+        print(f"[TTS exception] {e}", file=sys.stderr)
+        print(f"  {clean_text}")  # Fallback: print text
+
+
+def play_listening_blip() -> None:
+    """Play a subtle sound to indicate the agent is listening."""
+    try:
+        # Generate a short sine wave beep
+        duration = 0.1  # seconds
+        freq = 800  # Hz
+        sample_rate = 44100
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        wave = 0.3 * np.sin(2 * np.pi * freq * t)
+        
+        # Convert to 16-bit PCM
+        audio = (wave * 32767).astype(np.int16)
+        
+        # Save to temp WAV file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            with wave.open(temp_path, "w") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio.tobytes())
+        
+        try:
+            subprocess.run(
+                ["mpv", "--quiet", "--no-video", "--volume=50", temp_path],
+                capture_output=True,
+                timeout=5,
+            )
+        finally:
+            os.unlink(temp_path)
+    except Exception:
+        pass  # Silent failure for blip
+
+
+def play_activation_chime() -> None:
+    """Play ascending chime for activation."""
+    try:
+        duration = 0.3
+        sample_rate = 44100
+        freqs = [523.25, 659.25, 783.99]  # C major chord ascending
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            with wave.open(temp_path, "w") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                
+                for freq in freqs:
+                    t = np.linspace(0, duration / len(freqs), int(sample_rate * duration / len(freqs)), False)
+                    wave_data = 0.4 * np.sin(2 * np.pi * freq * t)
+                    # Add envelope
+                    envelope = np.linspace(0, 1, len(t) // 4).tolist() + [1] * (len(t) // 2) + np.linspace(1, 0, len(t) // 4).tolist()
+                    if len(envelope) < len(t):
+                        envelope.extend([0] * (len(t) - len(envelope)))
+                    envelope = envelope[:len(t)]
+                    wave_data = wave_data * envelope
+                    audio = (wave_data * 32767).astype(np.int16)
+                    wav_file.writeframes(audio.tobytes())
+        
+        try:
+            subprocess.run(
+                ["mpv", "--quiet", "--no-video", temp_path],
+                capture_output=True,
+                timeout=5,
+            )
+        finally:
+            os.unlink(temp_path)
     except Exception:
         pass
 
-    # Fallback to direct agent invocation
+
+def play_deactivation_chime() -> None:
+    """Play descending chime for deactivation."""
     try:
-        proc = subprocess.run(
-            [OPENCLAW_BIN, "agent", "--message", full_message, "--thinking", "low"],
-            capture_output=True,
-            text=True,
-            timeout=65,
-            env=env,
-        )
-        out = proc.stdout.strip()
-        return (
-            clean_response(out)
-            if out
-            else proc.stderr.strip() or "Sorry, I didn't get a response."
-        )
-    except Exception as e:
-        return f"Something went wrong: {e}"
+        duration = 0.3
+        sample_rate = 44100
+        freqs = [783.99, 659.25, 523.25]  # C major chord descending
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            with wave.open(temp_path, "w") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                
+                for freq in freqs:
+                    t = np.linspace(0, duration / len(freqs), int(sample_rate * duration / len(freqs)), False)
+                    wave_data = 0.4 * np.sin(2 * np.pi * freq * t)
+                    # Add envelope
+                    envelope = np.linspace(0, 1, len(t) // 4).tolist() + [1] * (len(t) // 2) + np.linspace(1, 0, len(t) // 4).tolist()
+                    if len(envelope) < len(t):
+                        envelope.extend([0] * (len(t) - len(envelope)))
+                    envelope = envelope[:len(t)]
+                    wave_data = wave_data * envelope
+                    audio = (wave_data * 32767).astype(np.int16)
+                    wav_file.writeframes(audio.tobytes())
+        
+        try:
+            subprocess.run(
+                ["mpv", "--quiet", "--no-video", temp_path],
+                capture_output=True,
+                timeout=5,
+            )
+        finally:
+            os.unlink(temp_path)
+    except Exception:
+        pass
 
 
-# ── Phrase detection helpers ─────────────────────────────────────────────────
-
-
-def _normalize(text: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
-    lower = text.lower().strip()
-    lower = re.sub(r"[.,!?:;\-'\"]+", " ", lower)
-    lower = re.sub(r"\s+", " ", lower).strip()
-    return lower
-
-
-def detect_wake(text: str) -> tuple[bool, str]:
-    """Check if text contains the activation phrase. Returns (triggered, remainder)."""
-    norm = _normalize(text)
-    for variant in WAKE_VARIANTS:
-        idx = norm.find(variant)
-        if idx != -1:
-            remainder = text[idx + len(variant) :].strip()
-            remainder = re.sub(r"^[\s,.\-:!?]+", "", remainder)
-            return True, remainder
-    return False, ""
-
-
-def detect_deactivate(text: str) -> bool:
-    """Check if text contains the deactivation phrase."""
-    norm = _normalize(text)
-    for variant in DEACTIVATE_VARIANTS:
-        if variant in norm:
-            return True
-    return False
-
-
-# ── Main Agent Class ─────────────────────────────────────────────────────────
+# ── Voice Wake Agent ──────────────────────────────────────────────────────────
 
 
 class VoiceWakeAgent:
-    """
-    State machine:
-      STANDBY    → listening for "trap god activate"
-      ACTIVE     → conversational mode, capturing utterances
-      CAPTURING  → mid-utterance, buffering words
-      PROCESSING → waiting for OpenClaw response + TTS
-      COOLDOWN   → short pause after TTS to avoid self-trigger
-    """
-
+    """Voice-activated OpenClaw assistant with conversation memory."""
+    
     def __init__(self):
-        self.state = "standby"
-        self.transcript_buffer: list[str] = []
-        self.last_speech_time = 0.0
-        self.wake_time = 0.0
-        self.last_activity_time = 0.0
+        self.state = "standby"  # standby, active, capturing, processing, cooldown
         self._running = True
         self._socket = None
-        self._greeting_idx = 0
-        self._deactivation_idx = 0
-
-        # Load memory on startup
-        _ensure_memory_dir()
-        recent = load_recent_turns(5)
-        if recent:
-            print(f"[MEMORY] Loaded {len(recent)} recent conversation turns")
-
-    def _next_greeting(self) -> str:
-        g = ACTIVATION_GREETINGS[self._greeting_idx % len(ACTIVATION_GREETINGS)]
-        self._greeting_idx += 1
-        return g
-
-    def _next_deactivation(self) -> str:
-        d = DEACTIVATION_RESPONSES[self._deactivation_idx % len(DEACTIVATION_RESPONSES)]
-        self._deactivation_idx += 1
-        return d
-
-    # ── Deepgram message handler ─────────────────────────────────────────
-
-    def _on_message(self, message):
-        if not isinstance(message, ListenV1ResultsEvent):
-            if isinstance(message, ListenV1UtteranceEndEvent):
-                self._on_utterance_end()
+        self.transcript_buffer = []
+        self.wake_time = 0.0
+        self.last_speech_time = 0.0
+        self.last_activity_time = 0.0
+    
+    # ── Event handlers ───────────────────────────────────────────────
+    
+    def _on_message(self, event: ListenV1ResultsEvent, **kwargs):
+        """Handle incoming speech recognition results."""
+        # Filter out non-result events (like SpeechStarted) that don't have is_final
+        if not hasattr(event, "is_final"):
             return
 
-        result = message
-        if not result.channel or not result.channel.alternatives:
-            return
-
-        alt = result.channel.alternatives[0]
-        text = alt.transcript.strip()
-        if not text:
-            return
-
-        is_final = bool(result.is_final)
-
-        if DEBUG:
-            tag = "F" if is_final else "I"
-            print(f"  [{tag}] {text}")
-
-        now = time.monotonic()
-
-        # ── Deactivation check (any active state) ────────────────────
-        if (
-            self.state in ("active", "capturing", "processing")
-            and is_final
-            and detect_deactivate(text)
-        ):
-            self._do_deactivate()
-            return
-
-        # ── STANDBY: scan for wake phrase ─────────────────────────────
-        if self.state == "standby":
-            if is_final and text:
-                if DEBUG:
-                    print(f"  [standby] heard: {text}")
-            triggered, remainder = detect_wake(text)
-            if triggered and is_final:
-                self._do_activate(remainder)
-            return
-
-        # ── ACTIVE: waiting for user to speak ─────────────────────────
-        if self.state == "active":
-            if is_final and text:
-                # User started talking — switch to capturing
-                # But first check if it's just the wake phrase again
-                triggered, remainder = detect_wake(text)
-                if triggered:
-                    # Re-activation, just acknowledge
+        if event.is_final:
+            transcript = event.channel.alternatives[0].transcript.strip()
+            if not transcript:
+                return
+            
+            if DEBUG:
+                print(f"  [transcript: {transcript}]")
+            
+            lower = transcript.lower()
+            
+            # Check for deactivation phrase
+            if self.state in ("active", "capturing"):
+                if any(variant in lower for variant in DEACTIVATE_VARIANTS):
+                    self._do_deactivate()
                     return
-                self.state = "capturing"
-                self.wake_time = now
-                self.last_speech_time = now
-                self.transcript_buffer.clear()
-                self.transcript_buffer.append(text)
-                self.last_activity_time = now
-            return
-
-        # ── CAPTURING: buffering utterance ────────────────────────────
-        if self.state == "capturing":
-            if is_final and text:
-                # Don't re-capture the wake phrase
-                triggered, cleaned = detect_wake(text)
-                chunk = (
-                    cleaned if triggered and cleaned else text if not triggered else ""
-                )
-                if chunk:
-                    self.transcript_buffer.append(chunk)
-                    self.last_speech_time = now
-                    self.last_activity_time = now
-
-    def _on_utterance_end(self):
-        if self.state == "capturing" and self.transcript_buffer:
-            self.last_speech_time = time.monotonic() - UTTERANCE_TIMEOUT_S + 0.3
-
+            
+            # Check for wake phrase
+            if self.state == "standby":
+                if any(variant in lower for variant in WAKE_VARIANTS):
+                    self._do_activate()
+                return
+            
+            # In active/capturing mode, buffer the transcript
+            if self.state in ("active", "capturing"):
+                self.transcript_buffer.append(transcript)
+                self.last_speech_time = time.monotonic()
+                if self.state == "active":
+                    self.state = "capturing"
+                    self.wake_time = time.monotonic()
+    
     def _on_error(self, error):
-        print(f"[ERROR] {error}", file=sys.stderr)
-
+        """Handle Deepgram errors."""
+        print(f"[Deepgram error] {error}", file=sys.stderr)
+    
     # ── State transitions ────────────────────────────────────────────
-
-    def _do_activate(self, initial_remainder: str = ""):
-        print(f"\n{'=' * 50}")
-        print(f"  >>> TRAP GOD ACTIVATED")
-        print(f"{'=' * 50}")
-
+    
+    def _do_activate(self):
+        """Activate the agent."""
+        print(f"\n[ACTIVATED] {random.choice(ACTIVATION_GREETINGS)}")
+        play_activation_chime()
         self.state = "active"
-        now = time.monotonic()
-        self.wake_time = now
-        self.last_speech_time = now
-        self.last_activity_time = now
-        self.transcript_buffer.clear()
-
-        # Play chime and speak greeting
-        def _greet():
-            play_activation_chime()
-            greeting = self._next_greeting()
-            speak(greeting)
-            save_turn("assistant", greeting)
-            self.last_activity_time = time.monotonic()
-
-        threading.Thread(target=_greet, daemon=True).start()
-
-        # If there was speech after the wake phrase, start capturing it
-        if initial_remainder:
-            self.state = "capturing"
-            self.transcript_buffer.append(initial_remainder)
-
+        self.transcript_buffer = []
+        self.last_activity_time = time.monotonic()
+        greeting = random.choice(ACTIVATION_GREETINGS)
+        speak(greeting)
+        print(f"[ACTIVE] Listening... (say '{DEACTIVATE_PHRASE}' to deactivate)")
+    
     def _do_deactivate(self):
-        farewell = self._next_deactivation()
-        print(f"\n{'=' * 50}")
-        print(f"  <<< DEACTIVATED — {farewell}")
-        print(f"{'=' * 50}")
-
-        self.state = "cooldown"
-        self.transcript_buffer.clear()
-
-        def _farewell():
-            play_deactivation_chime()
-            speak(farewell)
-            save_turn("assistant", farewell)
-            time.sleep(COOLDOWN_S)
-            self.state = "standby"
-            print(f"\n[STANDBY] Listening for '{WAKE_PHRASE}'...")
-
-        threading.Thread(target=_farewell, daemon=True).start()
-
+        """Deactivate the agent."""
+        print(f"\n[DEACTIVATED] {random.choice(DEACTIVATION_RESPONSES)}")
+        play_deactivation_chime()
+        self.state = "standby"
+        self.transcript_buffer = []
+        farewell = random.choice(DEACTIVATION_RESPONSES)
+        speak(farewell)
+        print(f"\n[STANDBY] Listening for '{WAKE_PHRASE}'...\n")
+    
     def _process_command(self, command: str):
         """Process a captured voice command: send to OpenClaw with memory, speak response."""
         self.state = "processing"
+        
+        # Filter short noise/ghost inputs
+        cleaned_cmd = re.sub(r"[^\w\s]", "", command).strip()
+        if len(cleaned_cmd) < 2 and cleaned_cmd.lower() not in ["y", "n"]:
+            print(f'[IGNORED NOISE] "{command}"')
+            self.state = "active"
+            self.last_activity_time = time.monotonic()
+            return
+
         print(f'\n[COMMAND] "{command}"')
 
         # Save user turn to memory
@@ -717,10 +670,15 @@ class VoiceWakeAgent:
             def audio_callback(indata, frames, time_info, status):
                 if status and DEBUG:
                     print(f"  [audio status: {status}]")
-                # Mute mic during cooldown / processing to avoid self-trigger
-                if self.state in ("cooldown", "processing"):
-                    return
+                
+                # Convert input to PCM 16-bit
                 pcm = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+
+                # If processing/cooldown, replace mic audio with silence to avoid self-trigger
+                # BUT still send it to keep Deepgram connection alive (prevents 1011 timeout)
+                if self.state in ("cooldown", "processing"):
+                    pcm = b"\x00" * len(pcm)
+
                 try:
                     socket.send_media(pcm)
                 except Exception:

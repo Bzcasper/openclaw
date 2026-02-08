@@ -41,7 +41,26 @@
     "bind": "auto",
     "trustedProxies": ["172.16.2.2"],
     "controlUi": {
-      "allowInsecureAuth": true
+      "allowInsecureAuth": true,
+      "allowedOrigins": ["http://localhost", "http://127.0.0.1", "file://", "null"]
+    }
+  },
+  "plugins": {
+    "entries": {
+      "voice-call": {
+        "enabled": true,
+        "config": {
+          "provider": "mock",
+          "fromNumber": "+15550001234",
+          "tts": {
+            "provider": "elevenlabs",
+            "elevenlabs": {
+              "voiceId": "pMsXgVXv3BLzUgSXRplE",
+              "modelId": "eleven_multilingual_v2"
+            }
+          }
+        }
+      }
     }
   },
   "meta": {

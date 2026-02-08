@@ -91,6 +91,17 @@ const QIANFAN_DEFAULT_COST = {
   cacheWrite: 0,
 };
 
+const HF_API_BASE_URL = "https://api-inference.huggingface.co/v1";
+const HF_DEFAULT_MODEL_ID = "meta-llama/Llama-3.3-70B-Instruct";
+const HF_DEFAULT_CONTEXT_WINDOW = 128000;
+const HF_DEFAULT_MAX_TOKENS = 8192;
+const HF_DEFAULT_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
 interface OllamaModel {
   name: string;
   modified_at: string;
@@ -325,6 +336,24 @@ function buildMinimaxPortalProvider(): ProviderConfig {
   };
 }
 
+function buildHfProvider(): ProviderConfig {
+  return {
+    baseUrl: HF_API_BASE_URL,
+    api: "openai-completions",
+    models: [
+      {
+        id: HF_DEFAULT_MODEL_ID,
+        name: "Llama 3.3 70B (HF)",
+        reasoning: false,
+        input: ["text"],
+        cost: HF_DEFAULT_COST,
+        contextWindow: HF_DEFAULT_CONTEXT_WINDOW,
+        maxTokens: HF_DEFAULT_MAX_TOKENS,
+      },
+    ],
+  };
+}
+
 function buildMoonshotProvider(): ProviderConfig {
   return {
     baseUrl: MOONSHOT_BASE_URL,
@@ -476,6 +505,13 @@ export async function resolveImplicitProviders(params: {
     resolveApiKeyFromProfiles({ provider: "synthetic", store: authStore });
   if (syntheticKey) {
     providers.synthetic = { ...buildSyntheticProvider(), apiKey: syntheticKey };
+  }
+
+  const hfKey =
+    resolveEnvApiKeyVarName("hf") ??
+    resolveApiKeyFromProfiles({ provider: "hf", store: authStore });
+  if (hfKey) {
+    providers.hf = { ...buildHfProvider(), apiKey: hfKey };
   }
 
   const veniceKey =

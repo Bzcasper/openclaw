@@ -110,13 +110,35 @@ fi
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
   echo "✗ Agent script not found: $AGENT_SCRIPT" >&2
   exit 1
+  exit 1
+fi
+
+if ! command -v mpv &>/dev/null; then
+  echo "✗ mpv not found. Please install it (e.g. sudo apt install mpv / brew install mpv)" >&2
+  exit 1
 fi
 
 # ── Preflight: check OpenClaw binary ──────────────────────────────────────────
-OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
-  echo "⚠ Warning: openclaw binary not found at $OPENCLAW_BIN" >&2
-  echo "   Set OPENCLAW_BIN or ensure openclaw is on PATH" >&2
+if [[ -z "${OPENCLAW_BIN:-}" ]]; then
+  # Try to find local binary relative to this script
+  # script is in skills/voice-wake/scripts/
+  PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+  if [[ -f "$PROJECT_ROOT/openclaw.mjs" ]]; then
+    OPENCLAW_BIN="$PROJECT_ROOT/openclaw.mjs"
+  elif [[ -f "./openclaw.mjs" ]]; then
+    OPENCLAW_BIN="./openclaw.mjs"
+  else
+    OPENCLAW_BIN="openclaw"
+  fi
+fi
+export OPENCLAW_BIN
+
+if [[ "$OPENCLAW_BIN" == "openclaw" ]] && ! command -v openclaw &>/dev/null; then
+  echo "⚠ Warning: openclaw binary not found in PATH" >&2
+  echo "   The agent might fail to send messages." >&2
+elif [[ "$OPENCLAW_BIN" != "openclaw" ]] && [[ ! -x "$OPENCLAW_BIN" ]]; then
+   # Ensure it's executable
+   chmod +x "$OPENCLAW_BIN"
 fi
 
 # ── Run ───────────────────────────────────────────────────────────────────────
