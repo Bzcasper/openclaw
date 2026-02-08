@@ -43,7 +43,14 @@ function normalizePresenceKey(key: string | undefined): string | undefined {
 }
 
 function resolvePrimaryIPv4(): string | undefined {
-  const nets = os.networkInterfaces();
+  let nets: ReturnType<typeof os.networkInterfaces>;
+  try {
+    nets = os.networkInterfaces();
+  } catch {
+    // Some restricted environments can throw from uv_interface_addresses.
+    // Presence should degrade gracefully instead of crashing.
+    return os.hostname();
+  }
   const prefer = ["en0", "eth0"];
   const pick = (names: string[]) => {
     for (const name of names) {

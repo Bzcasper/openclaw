@@ -50,6 +50,8 @@ type MemorySearchResult = {
   score: number;
 };
 
+type RankedMemorySearchResult = MemorySearchResult & { rerankScore?: number };
+
 // ============================================================================
 // LanceDB Provider
 // ============================================================================
@@ -163,19 +165,90 @@ class MemoryDB {
 class Embeddings {
   private client: OpenAI;
 
-  constructor(
-    apiKey: string,
-    private model: string,
-  ) {
-    this.client = new OpenAI({ apiKey });
+  private model: string;
+
+  constructor(params: { apiKey: string; model: string; baseUrl?: string }) {
+    this.client = new OpenAI({ apiKey: params.apiKey, baseURL: params.baseUrl });
+    this.model = params.model;
   }
 
   async embed(text: string): Promise<number[]> {
     const response = await this.client.embeddings.create({
       model: this.model,
       input: text,
+      // OpenAI's SDK defaults to base64 when encoding_format isn't set; we want JSON floats so
+      // OpenAI-compatible endpoints (including custom ones) can respond with `number[]`.
+      encoding_format: "float",
     });
-    return response.data[0].embedding;
+    const embedding = response.data[0]?.embedding as unknown;
+    if (!embedding) {
+      throw new Error("Embeddings response missing data[0].embedding");
+    }
+    if (Array.isArray(embedding)) {
+      return embedding;
+    }
+    if (typeof embedding === "object" && embedding && "length" in embedding) {
+      // Float32Array (OpenAI) or other typed array.
+      return Array.from(embedding as ArrayLike<number>);
+    }
+    throw new Error(`Embeddings response had unexpected embedding type: ${typeof embedding}`);
+  }
+}
+
+type RerankResult = { index: number; relevance_score: number };
+
+class Reranker {
+  private readonly baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  async rerank(params: {
+    query: string;
+    documents: string[];
+    topN: number;
+  }): Promise<RerankResult[]> {
+    const res = await fetch(`${this.baseUrl}/rerank`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: params.query,
+        documents: params.documents,
+        top_n: params.topN,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`rerank failed (${res.status}): ${body.slice(0, 240)}`);
+    }
+
+    const data = (await res.json()) as unknown;
+    if (!data || typeof data !== "object" || !("results" in data)) {
+      throw new Error("rerank response missing results");
+    }
+    const results = (data as { results?: unknown }).results;
+    if (!Array.isArray(results)) {
+      throw new Error("rerank response results is not an array");
+    }
+    return results
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const obj = entry as Record<string, unknown>;
+        const index = obj.index;
+        const relevance = obj.relevance_score;
+        if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
+          return null;
+        }
+        if (typeof relevance !== "number" || !Number.isFinite(relevance)) {
+          return null;
+        }
+        return { index, relevance_score: relevance };
+      })
+      .filter((entry): entry is RerankResult => Boolean(entry));
   }
 }
 
@@ -250,9 +323,23 @@ const memoryPlugin = {
   register(api: OpenClawPluginApi) {
     const cfg = memoryConfigSchema.parse(api.pluginConfig);
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
-    const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
+    const vectorDim =
+      cfg.embedding.dimensions ??
+      vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const embeddings = new Embeddings({
+      apiKey: cfg.embedding.apiKey,
+      model: cfg.embedding.model!,
+      baseUrl: cfg.embedding.baseUrl,
+    });
+    const rerankBaseUrl = cfg.rerank?.baseUrl ?? cfg.embedding.baseUrl;
+    const reranker =
+      cfg.rerank?.enabled === true ? (rerankBaseUrl ? new Reranker(rerankBaseUrl) : null) : null;
+    if (cfg.rerank?.enabled === true && !reranker) {
+      api.logger.warn(
+        "memory-lancedb: rerank.enabled=true but no rerank.baseUrl (or embedding.baseUrl) is configured; reranking disabled",
+      );
+    }
 
     api.logger.info(`memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`);
 
@@ -275,33 +362,72 @@ const memoryPlugin = {
 
           const vector = await embeddings.embed(query);
           const results = await db.search(vector, limit, 0.1);
+          let rankedResults: RankedMemorySearchResult[] = results;
 
-          if (results.length === 0) {
+          if (reranker && results.length > 1) {
+            const topN = Math.min(cfg.rerank?.topN ?? limit, results.length);
+            try {
+              const reranked = await reranker.rerank({
+                query,
+                documents: results.map((r) => r.entry.text),
+                topN,
+              });
+              const seen = new Set<number>();
+              rankedResults = [];
+              for (const r of reranked) {
+                const candidate = results[r.index];
+                if (!candidate) {
+                  continue;
+                }
+                rankedResults.push({ ...candidate, rerankScore: r.relevance_score });
+                seen.add(r.index);
+              }
+              for (let i = 0; i < results.length; i += 1) {
+                if (!seen.has(i)) {
+                  rankedResults.push(results[i]);
+                }
+              }
+            } catch (err) {
+              api.logger.warn(`memory-lancedb: rerank failed: ${String(err)}`);
+              rankedResults = results;
+            }
+          }
+
+          if (rankedResults.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant memories found." }],
               details: { count: 0 },
             };
           }
 
-          const text = results
-            .map(
-              (r, i) =>
-                `${i + 1}. [${r.entry.category}] ${r.entry.text} (${(r.score * 100).toFixed(0)}%)`,
-            )
+          const text = rankedResults
+            .map((r, i) => {
+              const finalScore = r.rerankScore ?? r.score;
+              const suffix = r.rerankScore === undefined ? "" : " rerank";
+              return `${i + 1}. [${r.entry.category}] ${r.entry.text} (${(finalScore * 100).toFixed(
+                0,
+              )}%${suffix})`;
+            })
             .join("\n");
 
           // Strip vector data for serialization (typed arrays can't be cloned)
-          const sanitizedResults = results.map((r) => ({
+          const sanitizedResults = rankedResults.map((r) => ({
             id: r.entry.id,
             text: r.entry.text,
             category: r.entry.category,
             importance: r.entry.importance,
-            score: r.score,
+            score: r.rerankScore ?? r.score,
+            vectorScore: r.score,
+            rerankScore: r.rerankScore,
           }));
 
           return {
-            content: [{ type: "text", text: `Found ${results.length} memories:\n\n${text}` }],
-            details: { count: results.length, memories: sanitizedResults },
+            content: [{ type: "text", text: `Found ${rankedResults.length} memories:\n\n${text}` }],
+            details: {
+              count: rankedResults.length,
+              rerankEnabled: Boolean(reranker),
+              memories: sanitizedResults,
+            },
           };
         },
       },
@@ -497,16 +623,48 @@ const memoryPlugin = {
         try {
           const vector = await embeddings.embed(event.prompt);
           const results = await db.search(vector, 3, 0.3);
+          let rankedResults: RankedMemorySearchResult[] = results;
 
-          if (results.length === 0) {
+          if (reranker && results.length > 1) {
+            const topN = Math.min(cfg.rerank?.topN ?? results.length, results.length);
+            try {
+              const reranked = await reranker.rerank({
+                query: event.prompt,
+                documents: results.map((r) => r.entry.text),
+                topN,
+              });
+              const seen = new Set<number>();
+              rankedResults = [];
+              for (const r of reranked) {
+                const candidate = results[r.index];
+                if (!candidate) {
+                  continue;
+                }
+                rankedResults.push({ ...candidate, rerankScore: r.relevance_score });
+                seen.add(r.index);
+              }
+              for (let i = 0; i < results.length; i += 1) {
+                if (!seen.has(i)) {
+                  rankedResults.push(results[i]);
+                }
+              }
+            } catch (err) {
+              api.logger.warn(`memory-lancedb: rerank failed: ${String(err)}`);
+              rankedResults = results;
+            }
+          }
+
+          if (rankedResults.length === 0) {
             return;
           }
 
-          const memoryContext = results
+          const memoryContext = rankedResults
             .map((r) => `- [${r.entry.category}] ${r.entry.text}`)
             .join("\n");
 
-          api.logger.info?.(`memory-lancedb: injecting ${results.length} memories into context`);
+          api.logger.info?.(
+            `memory-lancedb: injecting ${rankedResults.length} memories into context`,
+          );
 
           return {
             prependContext: `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`,
